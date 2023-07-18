@@ -51,9 +51,10 @@ const (
 	EventNodeChildrenChanged EventType = 4
 
 	// EventSession represents a session event.
-	EventSession     EventType = -1
-	EventNotWatching EventType = -2
-	EventWatching    EventType = -3
+	EventSession      EventType = -1
+	EventNotWatching  EventType = -2
+	EventWatching     EventType = -3
+	EventPingReceived EventType = -4
 )
 
 var (
@@ -65,6 +66,7 @@ var (
 		EventSession:             "EventSession",
 		EventNotWatching:         "EventNotWatching",
 		EventWatching:            "EventWatching",
+		EventPingReceived:        "EventPingReceived",
 	}
 )
 

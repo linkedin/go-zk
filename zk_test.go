@@ -3,6 +3,7 @@ package zk
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -591,30 +592,17 @@ func TestPersistentWatchOnReconnect(t *testing.T) {
 			t.Fatalf("AddPersistentWatch returned error: %+v", err)
 		}
 
-		watchEventsCh := make(chan Event)
-		go func() {
-			e, err := watchEventsQueue.Next(context.Background())
-			if err != nil {
-				close(watchEventsCh)
-				return
-			} else {
-				watchEventsCh <- e
-			}
-		}()
+		// wait for the initial EventWatching
+		waitForEvent(t, time.Second, watchEventsQueue, EventWatching)
 
 		_, err = zk2.Create(testNode, []byte{1}, 0, WorldACL(PermAll))
 		if err != nil {
 			t.Fatalf("Create returned an error: %+v", err)
 		}
 
-		// check to see that we received the node creation event
-		select {
-		case ev := <-watchEventsCh:
-			if ev.Type != EventNodeCreated {
-				t.Fatalf("Second event on persistent watch was not a node creation event: %+v", ev)
-			}
-		case <-time.After(100 * time.Millisecond):
-			t.Fatalf("Persistent watcher for %q did not receive node creation event", testNode)
+		e := waitForEvent(t, time.Second, watchEventsQueue, EventNodeCreated)
+		if e.Path != testNode {
+			t.Fatalf("Event on persistent watch did not fire for expected node %q, got %q", testNode, e.Path)
 		}
 
 		// Simulate network error by brutally closing the network connection.
@@ -625,76 +613,64 @@ func TestPersistentWatchOnReconnect(t *testing.T) {
 			t.Fatalf("Set returned error: %+v", err)
 		}
 
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		t.Cleanup(cancel)
 		// zk should still be waiting to reconnect, so none of the watches should have been triggered
-		select {
-		case <-watchEventsCh:
-			t.Fatalf("Persistent watcher for %q should not have triggered yet", testNode)
-		case <-time.After(100 * time.Millisecond):
+		e, err = watchEventsQueue.Next(ctx)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Persistent watcher for %q should not have triggered yet (%+v)", testNode, e)
 		}
 
 		// now we let the reconnect occur and make sure it resets watches
 		close(zk.reconnectLatch)
 
 		// wait for reconnect event
-		select {
-		case ev := <-watchEventsCh:
-			if ev.Type != EventWatching {
-				t.Fatalf("Persistent watcher did not receive reconnect event: %+v", ev)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("Persistent watcher for %q did not receive connection event", testNode)
+		waitForEvent(t, 5*time.Second, watchEventsQueue, EventWatching)
+
+		_, err = zk2.Set(testNode, []byte{3}, -1)
+		if err != nil {
+			t.Fatalf("Set returned error: %+v", err)
 		}
 
-		eventsReceived := 0
-		timeout := time.After(2 * time.Second)
-		secondTimeout := time.After(4 * time.Second)
-		for {
-			select {
-			case e := <-watchEventsCh:
-				if e.Type != EventNodeDataChanged {
-					t.Fatalf("Unexpected event received by persistent watcher: %+v", e)
-				}
-				eventsReceived++
-			case <-timeout:
-				_, err = zk2.Set(testNode, []byte{3}, -1)
-				if err != nil {
-					t.Fatalf("Set returned error: %+v", err)
-				}
-			case <-secondTimeout:
-				switch eventsReceived {
-				case 2:
-					t.Fatalf("Sanity check failed: the persistent watch logic is based around the assumption that the " +
-						"setWatchers call _does not_ bootstrap you on reconnect based on the relative Zxid (unlike " +
-						"standard watches).")
-				case 1:
-					return
-				default:
-					t.Fatalf("Received no events after reconnect")
-				}
-			}
-		}
+		waitForEvent(t, 1*time.Second, watchEventsQueue, EventNodeDataChanged)
 	})
+}
+
+func waitForEvent(t *testing.T, timeout time.Duration, ch EventQueue, expectedType EventType) Event {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	t.Cleanup(cancel)
+	e, err := ch.Next(ctx)
+	requireNoErrorf(t, err)
+
+	if e.Type != expectedType {
+		t.Fatalf("Did not receive event of type %s, got %s instead", expectedType, e.Type)
+	}
+
+	return e
 }
 
 func TestPersistentWatchOnClose(t *testing.T) {
 	RequireMinimumZkVersion(t, "3.6")
 	WithTestCluster(t, 10*time.Second, func(_ *TestCluster, zk *Conn) {
 		ch, err := zk.AddPersistentWatch("/", AddWatchModePersistent)
+		requireNoErrorf(t, err, "could not add persistent watch")
+
+		waitForEvent(t, 2*time.Second, ch, EventWatching)
+		zk.Close()
+		waitForEvent(t, 2*time.Second, ch, EventNotWatching)
+	})
+}
+
+func TestPersistentWatchGetsPinged(t *testing.T) {
+	RequireMinimumZkVersion(t, "3.6")
+	WithTestCluster(t, 60*time.Second, func(_ *TestCluster, zk *Conn) {
+		ch, err := zk.AddPersistentWatch("/", AddWatchModePersistent)
 		if err != nil {
 			t.Fatalf("Could not add persistent watch: %+v", err)
 		}
-		zk.Close()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		t.Cleanup(cancel)
-
-		e, err := ch.Next(ctx)
-		if err != nil {
-			t.Fatalf("Did not get disconnect event (%+v)", err)
-		}
-		if e.Type != EventNotWatching {
-			t.Fatalf("Unexpected event: %+v", e)
-		}
+		waitForEvent(t, time.Minute, ch, EventWatching)
+		waitForEvent(t, time.Minute, ch, EventPingReceived)
 	})
 }
 

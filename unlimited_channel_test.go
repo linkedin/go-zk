@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -24,10 +25,10 @@ func TestUnlimitedChannel(t *testing.T) {
 
 			// check that events can be pushed without consumers
 			for i := 0; i < eventCount; i++ {
-				ch.push(newEvent(i))
+				ch.Push(newEvent(i))
 			}
 			if closeAfterPushes {
-				ch.close()
+				ch.Close()
 			}
 
 			for events := 0; events < eventCount; events++ {
@@ -68,7 +69,7 @@ func TestUnlimitedChannel(t *testing.T) {
 			ctx = &customContext{
 				Context: ctx,
 				f: func() {
-					ch.push(expected)
+					ch.Push(expected)
 				},
 			}
 
@@ -80,6 +81,28 @@ func TestUnlimitedChannel(t *testing.T) {
 				t.Fatalf("Unexpected event received from Next (expected %+v, actual %+v", expected, actual)
 			}
 		}
+	})
+	t.Run("multiple consumers", func(t *testing.T) {
+		ch := newUnlimitedEventQueue()
+		for i := 0; i < 20; i++ {
+			ch.Push(newEvent(i))
+		}
+		ch.Close()
+		var wg sync.WaitGroup
+		wg.Add(20)
+		for i := 0; i < 5; i++ {
+			go func() {
+				for {
+					_, err := ch.Next(context.Background())
+					if errors.Is(err, ErrEventQueueClosed) {
+						return
+					}
+					requireNoErrorf(t, err)
+					wg.Done()
+				}
+			}()
+		}
+		wg.Wait()
 	})
 }
 

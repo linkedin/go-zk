@@ -155,6 +155,12 @@ type Event struct {
 	Path   string // For non-session events, the path of the watched node.
 	Err    error
 	Server string // For connection events
+	// For watch events, the zxid that caused the change (starting with ZK 3.9.0). For ping events, the zxid that the
+	// server last processed. Note that the last processed zxid is only updated once the watch events have been
+	// triggered. Since ZK operates over one connection, the watch events are therefore queued up before the ping. This
+	// means watch events should always be received before pings, and receiving a ping with a given zxid means any watch
+	// event for a lower zxid have already been received (if any).
+	Zxid int64
 }
 
 // HostProvider is used to represent a set of hosts a ZooKeeper client should connect to.
@@ -549,39 +555,50 @@ var eventWatchTypes = map[EventType][]watchType{
 	EventNodeDataChanged:     {watchTypeExist, watchTypeData, watchTypePersistent, watchTypePersistentRecursive},
 	EventNodeChildrenChanged: {watchTypeChild, watchTypePersistent},
 	EventNodeDeleted:         {watchTypeExist, watchTypeData, watchTypeChild, watchTypePersistent, watchTypePersistentRecursive},
+	EventPingReceived:        nil,
 }
 var persistentWatchTypes = []watchType{watchTypePersistent, watchTypePersistentRecursive}
 
 // Send event to all interested watchers
 func (c *Conn) notifyWatches(ev Event) {
-	wTypes := eventWatchTypes[ev.Type]
-	if len(wTypes) == 0 {
+	wTypes, ok := eventWatchTypes[ev.Type]
+	if !ok {
 		return
 	}
 
 	c.watchersLock.Lock()
 	defer c.watchersLock.Unlock()
 
-	broadcast := func(wpt watchPathType) {
-		for _, ch := range c.watchers[wpt] {
-			ch.push(ev)
-			if !wpt.wType.isPersistent() {
-				ch.close()
-				delete(c.watchers, wpt)
-			}
-		}
-	}
-
-	for _, t := range wTypes {
-		if t == watchTypePersistentRecursive {
-			for p := ev.Path; ; p, _ = SplitPath(p) {
-				broadcast(watchPathType{p, t})
-				if p == "/" {
-					break
+	if ev.Type == EventPingReceived {
+		for wpt, watchers := range c.watchers {
+			if wpt.wType.isPersistent() {
+				for _, ch := range watchers {
+					ch.Push(ev)
 				}
 			}
-		} else {
-			broadcast(watchPathType{ev.Path, t})
+		}
+	} else {
+		broadcast := func(wpt watchPathType) {
+			for _, ch := range c.watchers[wpt] {
+				ch.Push(ev)
+				if !wpt.wType.isPersistent() {
+					ch.Close()
+					delete(c.watchers, wpt)
+				}
+			}
+		}
+
+		for _, t := range wTypes {
+			if t == watchTypePersistentRecursive {
+				for p := ev.Path; ; p, _ = SplitPath(p) {
+					broadcast(watchPathType{p, t})
+					if p == "/" {
+						break
+					}
+				}
+			} else {
+				broadcast(watchPathType{ev.Path, t})
+			}
 		}
 	}
 }
@@ -603,8 +620,8 @@ func (c *Conn) invalidateWatches(err error) {
 			ev := Event{Type: EventNotWatching, State: StateDisconnected, Path: pathType.path, Err: err}
 			c.sendEvent(ev) // also publish globally
 			for _, ch := range watchers {
-				ch.push(ev)
-				ch.close()
+				ch.Push(ev)
+				ch.Close()
 			}
 			delete(c.watchers, pathType)
 		}
@@ -706,7 +723,7 @@ func (c *Conn) sendSetWatches() {
 							e := Event{Type: EventWatching, State: StateConnected, Path: p}
 							c.sendEvent(e) // also publish globally
 							for _, ch := range c.watchers[watchPathType{path: p, wType: wt}] {
-								ch.push(e)
+								ch.Push(e)
 							}
 						}
 					}
@@ -909,6 +926,11 @@ func (c *Conn) recvLoop(conn net.Conn) error {
 		} else if res.Xid == -2 {
 			// Ping response. Ignore.
 			c.metricReceiver.PongReceived()
+			c.notifyWatches(Event{
+				Type:  EventPingReceived,
+				State: StateHasSession,
+				Zxid:  res.Zxid,
+			})
 		} else if res.Xid < 0 {
 			c.logger.Printf("Xid < 0 (%d) but not ping or watcher event", res.Xid)
 		} else {
@@ -954,7 +976,7 @@ func (c *Conn) addWatcher(path string, watchType watchType, ch EventQueue) {
 	wpt := watchPathType{path, watchType}
 	c.watchers[wpt] = append(c.watchers[wpt], ch)
 	if watchType.isPersistent() {
-		ch.push(Event{Type: EventWatching, State: StateConnected, Path: path})
+		ch.Push(Event{Type: EventWatching, State: StateConnected, Path: path})
 	}
 }
 
@@ -1513,8 +1535,8 @@ func (c *Conn) RemovePersistentWatch(path string, ch EventQueue) (err error) {
 				if w == ch {
 					deleted = true
 					c.watchers[wpt] = append(c.watchers[wpt][:i], c.watchers[wpt][i+1:]...)
-					w.push(Event{Type: EventNotWatching, State: c.State(), Path: path, Err: ErrNoWatcher})
-					w.close()
+					w.Push(Event{Type: EventNotWatching, State: c.State(), Path: path, Err: ErrNoWatcher})
+					w.Close()
 					return
 				}
 			}
@@ -1548,8 +1570,8 @@ func (c *Conn) RemoveAllPersistentWatches(path string) (err error) {
 		for _, wt := range persistentWatchTypes {
 			wpt := watchPathType{path: path, wType: wt}
 			for _, ch := range c.watchers[wpt] {
-				ch.push(Event{Type: EventNotWatching, State: c.State(), Path: path, Err: ErrNoWatcher})
-				ch.close()
+				ch.Push(Event{Type: EventNotWatching, State: c.State(), Path: path, Err: ErrNoWatcher})
+				ch.Close()
 			}
 			delete(c.watchers, wpt)
 		}

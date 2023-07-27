@@ -9,9 +9,14 @@ import (
 var ErrEventQueueClosed = errors.New("zk: event queue closed")
 
 type EventQueue interface {
+	// Next waits for a new Event to be received until the context expires or the queue is closed.
 	Next(ctx context.Context) (Event, error)
-	push(e Event)
-	close()
+	// Push adds the given event to the queue and notifies any in-flight calls to Next that a new event is available.
+	Push(e Event)
+	// Close functions like closing a channel. Subsequent calls to Next will drain whatever events remain in the buffer
+	// while subsequent calls to Push will panic. Once remaining events are drained, Next will return
+	// ErrEventQueueClosed.
+	Close()
 }
 
 type chanEventQueue chan Event
@@ -29,11 +34,11 @@ func (c chanEventQueue) Next(ctx context.Context) (Event, error) {
 	}
 }
 
-func (c chanEventQueue) push(e Event) {
+func (c chanEventQueue) Push(e Event) {
 	c <- e
 }
 
-func (c chanEventQueue) close() {
+func (c chanEventQueue) Close() {
 	close(c)
 }
 
@@ -53,7 +58,7 @@ func newUnlimitedEventQueue() *unlimitedEventQueue {
 	}
 }
 
-func (q *unlimitedEventQueue) push(e Event) {
+func (q *unlimitedEventQueue) Push(e Event) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 
@@ -67,7 +72,7 @@ func (q *unlimitedEventQueue) push(e Event) {
 	q.newEvent = make(chan struct{})
 }
 
-func (q *unlimitedEventQueue) close() {
+func (q *unlimitedEventQueue) Close() {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 

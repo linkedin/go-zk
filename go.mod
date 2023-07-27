@@ -1,3 +1,3 @@
-module github.com/PapaCharlie/zk
+module github.com/linkedin/go-zk
 
-go 1.18
+go 1.20

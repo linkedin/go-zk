@@ -161,6 +161,10 @@ type Event struct {
 	// means watch events should always be received before pings, and receiving a ping with a given zxid means any watch
 	// event for a lower zxid have already been received (if any).
 	Zxid int64
+	// This is the time at which the event was received by the client. Useful to understand lag across the entire
+	// system. Note that this is NOT the time at which the event fired in the quorum. Only set for watch events and
+	// pings.
+	Timestamp time.Time
 }
 
 // HostProvider is used to represent a set of hosts a ZooKeeper client should connect to.
@@ -916,10 +920,11 @@ func (c *Conn) recvLoop(conn net.Conn) error {
 				return err
 			}
 			ev := Event{
-				Type:  we.Type,
-				State: we.State,
-				Path:  we.Path,
-				Err:   nil,
+				Type:      we.Type,
+				State:     we.State,
+				Path:      we.Path,
+				Err:       nil,
+				Timestamp: time.Now(),
 			}
 			c.sendEvent(ev)
 			c.notifyWatches(ev)
@@ -927,9 +932,10 @@ func (c *Conn) recvLoop(conn net.Conn) error {
 			// Ping response. Ignore.
 			c.metricReceiver.PongReceived()
 			c.notifyWatches(Event{
-				Type:  EventPingReceived,
-				State: StateHasSession,
-				Zxid:  res.Zxid,
+				Type:      EventPingReceived,
+				State:     StateHasSession,
+				Zxid:      res.Zxid,
+				Timestamp: time.Now(),
 			})
 		} else if res.Xid < 0 {
 			c.logger.Printf("Xid < 0 (%d) but not ping or watcher event", res.Xid)

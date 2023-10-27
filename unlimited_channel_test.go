@@ -20,10 +20,10 @@ func TestUnlimitedChannel(t *testing.T) {
 	names := []string{"notClosedAfterPushes", "closeAfterPushes"}
 	for i, closeAfterPushes := range []bool{false, true} {
 		t.Run(names[i], func(t *testing.T) {
-			ch := newUnlimitedEventQueue()
+			ch := NewUnlimitedQueue[Event]()
 			const eventCount = 10
 
-			// check that events can be pushed without consumers
+			// check that elements can be pushed without consumers
 			for i := 0; i < eventCount; i++ {
 				ch.Push(newEvent(i))
 			}
@@ -58,7 +58,7 @@ func TestUnlimitedChannel(t *testing.T) {
 		})
 	}
 	t.Run("interleaving", func(t *testing.T) {
-		ch := newUnlimitedEventQueue()
+		ch := NewUnlimitedQueue[Event]()
 
 		for i := 0; i < 10; i++ {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
@@ -83,7 +83,7 @@ func TestUnlimitedChannel(t *testing.T) {
 		}
 	})
 	t.Run("multiple consumers", func(t *testing.T) {
-		ch := newUnlimitedEventQueue()
+		ch := NewUnlimitedQueue[Event]()
 		for i := 0; i < 20; i++ {
 			ch.Push(newEvent(i))
 		}

@@ -124,7 +124,7 @@ func TestNotifyWatches(t *testing.T) {
 		},
 		{
 			name: "unlimited",
-			new:  func() EventQueue { return newUnlimitedEventQueue() },
+			new:  func() EventQueue { return NewUnlimitedQueue[Event]() },
 		},
 	}
 

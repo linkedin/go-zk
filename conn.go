@@ -1091,7 +1091,7 @@ func (c *Conn) ChildrenW(path string) ([]string, *Stat, <-chan Event, error) {
 		return nil, nil, nil, err
 	}
 
-	var ech chanEventQueue
+	var ech ChanQueue[Event]
 	res := &getChildren2Response{}
 	_, err := c.request(opGetChildren2, &getChildren2Request{Path: path, Watch: true}, res, func(req *request, res *responseHeader, err error) {
 		if err == nil {
@@ -1125,7 +1125,7 @@ func (c *Conn) GetW(path string) ([]byte, *Stat, <-chan Event, error) {
 		return nil, nil, nil, err
 	}
 
-	var ech chanEventQueue
+	var ech ChanQueue[Event]
 	res := &getDataResponse{}
 	_, err := c.request(opGetData, &getDataRequest{Path: path, Watch: true}, res, func(req *request, res *responseHeader, err error) {
 		if err == nil {
@@ -1304,7 +1304,7 @@ func (c *Conn) ExistsW(path string) (bool, *Stat, <-chan Event, error) {
 		return false, nil, nil, err
 	}
 
-	var ech chanEventQueue
+	var ech ChanQueue[Event]
 	res := &existsResponse{}
 	_, err := c.request(opExists, &existsRequest{Path: path, Watch: true}, res, func(req *request, res *responseHeader, err error) {
 		ech = newChanEventChannel()
@@ -1509,7 +1509,7 @@ func (c *Conn) AddPersistentWatch(path string, mode AddWatchMode) (ch EventQueue
 				wt = watchTypePersistentRecursive
 			}
 
-			ch = newUnlimitedEventQueue()
+			ch = NewUnlimitedQueue[Event]()
 			c.addWatcher(path, wt, ch)
 		}
 	})

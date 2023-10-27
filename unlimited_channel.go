@@ -8,103 +8,112 @@ import (
 
 var ErrEventQueueClosed = errors.New("zk: event queue closed")
 
-type EventQueue interface {
-	// Next waits for a new Event to be received until the context expires or the queue is closed.
-	Next(ctx context.Context) (Event, error)
-	// Push adds the given event to the queue and notifies any in-flight calls to Next that a new event is available.
-	Push(e Event)
-	// Close functions like closing a channel. Subsequent calls to Next will drain whatever events remain in the buffer
-	// while subsequent calls to Push will panic. Once remaining events are drained, Next will return
+type Queue[T any] interface {
+	// Next waits for a new element to be received until the context expires or the queue is closed.
+	Next(ctx context.Context) (T, error)
+	// Push adds the given element to the queue and notifies any in-flight calls to Next that a new element is
+	// available.
+	Push(e T)
+	// Close functions like closing a channel. Subsequent calls to Next will drain whatever elements remain in the
+	// buffer while subsequent calls to Push will panic. Once remaining elements are drained, Next will return
 	// ErrEventQueueClosed.
 	Close()
 }
 
-type chanEventQueue chan Event
+// EventQueue is added to preserve the old EventQueue type which had an equivalent interface, for backwards
+// compatibility in method signatures.
+type EventQueue = Queue[Event]
 
-func (c chanEventQueue) Next(ctx context.Context) (Event, error) {
+type ChanQueue[T any] chan T
+
+func (c ChanQueue[T]) Next(ctx context.Context) (T, error) {
 	select {
 	case <-ctx.Done():
-		return Event{}, ctx.Err()
+		var t T
+		return t, ctx.Err()
 	case e, ok := <-c:
 		if !ok {
-			return Event{}, ErrEventQueueClosed
+			var t T
+			return t, ErrEventQueueClosed
 		} else {
 			return e, nil
 		}
 	}
 }
 
-func (c chanEventQueue) Push(e Event) {
+func (c ChanQueue[T]) Push(e T) {
 	c <- e
 }
 
-func (c chanEventQueue) Close() {
+func (c ChanQueue[T]) Close() {
 	close(c)
 }
 
-func newChanEventChannel() chanEventQueue {
+func newChanEventChannel() ChanQueue[Event] {
 	return make(chan Event, 1)
 }
 
-type unlimitedEventQueue struct {
-	lock     sync.Mutex
-	newEvent chan struct{}
-	events   []Event
+type unlimitedEventQueue[T any] struct {
+	lock       sync.Mutex
+	newElement chan struct{}
+	elements   []T
 }
 
-func newUnlimitedEventQueue() *unlimitedEventQueue {
-	return &unlimitedEventQueue{
-		newEvent: make(chan struct{}),
+func NewUnlimitedQueue[T any]() Queue[T] {
+	return &unlimitedEventQueue[T]{
+		newElement: make(chan struct{}),
 	}
 }
 
-func (q *unlimitedEventQueue) Push(e Event) {
+func (q *unlimitedEventQueue[T]) Push(e T) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 
-	if q.newEvent == nil {
+	if q.newElement == nil {
 		// Panic like a closed channel
 		panic("send on closed unlimited channel")
 	}
 
-	q.events = append(q.events, e)
-	close(q.newEvent)
-	q.newEvent = make(chan struct{})
+	q.elements = append(q.elements, e)
+	close(q.newElement)
+	q.newElement = make(chan struct{})
 }
 
-func (q *unlimitedEventQueue) Close() {
+func (q *unlimitedEventQueue[T]) Close() {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 
-	if q.newEvent == nil {
+	if q.newElement == nil {
 		// Panic like a closed channel
-		panic("close of closed EventQueue")
+		panic("close of closed Queue")
 	}
 
-	close(q.newEvent)
-	q.newEvent = nil
+	close(q.newElement)
+	q.newElement = nil
 }
 
-func (q *unlimitedEventQueue) Next(ctx context.Context) (Event, error) {
+func (q *unlimitedEventQueue[T]) Next(ctx context.Context) (T, error) {
 	for {
 		q.lock.Lock()
-		if len(q.events) > 0 {
-			e := q.events[0]
-			q.events = q.events[1:]
+		if len(q.elements) > 0 {
+			e := q.elements[0]
+			q.elements = q.elements[1:]
 			q.lock.Unlock()
 			return e, nil
 		}
 
-		ch := q.newEvent
+		ch := q.newElement
 		if ch == nil {
 			q.lock.Unlock()
-			return Event{}, ErrEventQueueClosed
+			var t T
+			return t, ErrEventQueueClosed
 		}
 		q.lock.Unlock()
 
 		select {
 		case <-ctx.Done():
-			return Event{}, ctx.Err()
+			var t T
+			return t, ctx.Err()
 		case <-ch:
 			continue
 		}

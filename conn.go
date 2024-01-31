@@ -16,6 +16,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	mathrand "math/rand"
 	"net"
 	"strings"
 	"sync"
@@ -31,8 +33,8 @@ var ErrNoServer = errors.New("zk: could not connect to a server")
 // an invalid path. (e.g. empty path).
 var ErrInvalidPath = errors.New("zk: invalid path")
 
-// DefaultLogger uses the stdlib log package for logging.
-var DefaultLogger Logger = defaultLogger{}
+// DefaultLogger uses the stdlib slog package for logging.
+var DefaultLogger = slog.Default()
 
 const (
 	bufferSize      = 1536 * 1024
@@ -60,14 +62,6 @@ type watchPathType struct {
 	wType watchType
 }
 
-// Dialer is a function to be used to establish a connection to a single host.
-type Dialer func(network, address string, timeout time.Duration) (net.Conn, error)
-
-// Logger is an interface that can be implemented to provide custom log output.
-type Logger interface {
-	Printf(string, ...interface{})
-}
-
 type authCreds struct {
 	scheme string
 	auth   []byte
@@ -75,12 +69,12 @@ type authCreds struct {
 
 // Conn is the client connection and tracks all details for communication with the server.
 type Conn struct {
-	lastZxid         int64
-	sessionID        int64
-	state            State // must be 32-bit aligned
-	xid              uint32
-	sessionTimeoutMs int32 // session timeout in milliseconds
-	passwd           []byte
+	lastZxid       int64
+	sessionID      int64
+	state          State // must be 32-bit aligned
+	xid            uint32
+	sessionTimeout time.Duration
+	passwd         []byte
 
 	dialer         Dialer
 	hostProvider   HostProvider
@@ -96,6 +90,9 @@ type Conn struct {
 	connectTimeout time.Duration
 	maxBufferSize  int
 	metricReceiver MetricReceiver
+
+	reconnectInitialBackoff time.Duration
+	reconnectMaxBackoff     time.Duration
 
 	creds   []authCreds
 	credsMu sync.Mutex // protects server
@@ -116,14 +113,21 @@ type Conn struct {
 	debugCloseRecvLoop bool
 	resendZkAuthFn     func(context.Context, *Conn) error
 
-	logger  Logger
-	logInfo bool // true if information messages are logged; false if only errors are logged
+	logger *slog.Logger
 
 	buf []byte
 }
 
-// connOption represents a connection option.
-type connOption func(c *Conn)
+// ConnOption represents a connection option.
+type ConnOption interface {
+	apply(*Conn)
+}
+
+type connOption func(*Conn)
+
+func (c connOption) apply(conn *Conn) {
+	c(conn)
+}
 
 type request struct {
 	xid        int32
@@ -178,15 +182,8 @@ type HostProvider interface {
 	// Next returns the next server to connect to. retryStart will be true if we've looped through
 	// all known servers without Connected() being called.
 	Next() (server string, retryStart bool)
-	// Notify the HostProvider of a successful connection.
+	// Connected notifies the HostProvider of a successful connection.
 	Connected()
-}
-
-// ConnectWithDialer establishes a new connection to a pool of zookeeper servers
-// using a custom Dialer. See Connect for further information about session timeout.
-// This method is deprecated and provided for compatibility: use the WithDialer option instead.
-func ConnectWithDialer(servers []string, sessionTimeout time.Duration, dialer Dialer) (*Conn, <-chan Event, error) {
-	return Connect(servers, sessionTimeout, WithDialer(dialer))
 }
 
 // Connect establishes a new connection to a pool of zookeeper
@@ -195,7 +192,7 @@ func ConnectWithDialer(servers []string, sessionTimeout time.Duration, dialer Di
 // the session timeout it's possible to reestablish a connection to a different
 // server and keep the same session. This is means any ephemeral nodes and
 // watches are maintained.
-func Connect(servers []string, sessionTimeout time.Duration, options ...connOption) (*Conn, <-chan Event, error) {
+func Connect(servers []string, sessionTimeout time.Duration, options ...ConnOption) (*Conn, <-chan Event, error) {
 	if len(servers) == 0 {
 		return nil, nil, errors.New("zk: server list must not be empty")
 	}
@@ -207,7 +204,7 @@ func Connect(servers []string, sessionTimeout time.Duration, options ...connOpti
 
 	ec := make(chan Event, eventChanSize)
 	conn := &Conn{
-		dialer:         net.DialTimeout,
+		dialer:         new(net.Dialer),
 		hostProvider:   &DNSHostProvider{},
 		conn:           nil,
 		state:          StateDisconnected,
@@ -219,7 +216,6 @@ func Connect(servers []string, sessionTimeout time.Duration, options ...connOpti
 		watchers:       make(map[watchPathType][]EventQueue),
 		passwd:         emptyPassword,
 		logger:         DefaultLogger,
-		logInfo:        true, // default is true for backwards compatability
 		buf:            make([]byte, bufferSize),
 		resendZkAuthFn: resendZkAuth,
 		metricReceiver: UnimplementedMetricReceiver{},
@@ -227,14 +223,14 @@ func Connect(servers []string, sessionTimeout time.Duration, options ...connOpti
 
 	// Set provided options.
 	for _, option := range options {
-		option(conn)
+		option.apply(conn)
 	}
 
 	if err := conn.hostProvider.Init(srvs); err != nil {
 		return nil, nil, err
 	}
 
-	conn.setTimeouts(int32(sessionTimeout / time.Millisecond))
+	conn.setTimeouts(sessionTimeout)
 	// TODO: This context should be passed in by the caller to be the connection lifecycle context.
 	ctx := context.Background()
 
@@ -247,33 +243,32 @@ func Connect(servers []string, sessionTimeout time.Duration, options ...connOpti
 	return conn, ec, nil
 }
 
-// WithDialer returns a connection option specifying a non-default Dialer.
-func WithDialer(dialer Dialer) connOption {
-	return func(c *Conn) {
+// Dialer is an interface implemented by the standard [net.Dialer] but also by [crypto/tls.Dialer].
+type Dialer interface {
+	// DialContext will be invoked when connecting to a ZK host.
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+}
+
+// WithDialer returns a connection option specifying a non-default Dialer. This can be used, for
+// example, to enable TLS when connecting to the ZK server by passing in a [crypto/tls.Dialer].
+func WithDialer(dialer Dialer) ConnOption {
+	return connOption(func(c *Conn) {
 		c.dialer = dialer
-	}
+	})
 }
 
 // WithHostProvider returns a connection option specifying a non-default HostProvider.
-func WithHostProvider(hostProvider HostProvider) connOption {
-	return func(c *Conn) {
+func WithHostProvider(hostProvider HostProvider) ConnOption {
+	return connOption(func(c *Conn) {
 		c.hostProvider = hostProvider
-	}
+	})
 }
 
 // WithLogger returns a connection option specifying a non-default Logger.
-func WithLogger(logger Logger) connOption {
-	return func(c *Conn) {
+func WithLogger(logger *slog.Logger) ConnOption {
+	return connOption(func(c *Conn) {
 		c.logger = logger
-	}
-}
-
-// WithLogInfo returns a connection option specifying whether or not information messages
-// should be logged.
-func WithLogInfo(logInfo bool) connOption {
-	return func(c *Conn) {
-		c.logInfo = logInfo
-	}
+	})
 }
 
 // EventCallback is a function that is called when an Event occurs.
@@ -282,10 +277,10 @@ type EventCallback func(Event)
 // WithEventCallback returns a connection option that specifies an event
 // callback.
 // The callback must not block - doing so would delay the ZK go routines.
-func WithEventCallback(cb EventCallback) connOption {
-	return func(c *Conn) {
+func WithEventCallback(cb EventCallback) ConnOption {
+	return connOption(func(c *Conn) {
 		c.eventCallback = cb
-	}
+	})
 }
 
 // WithMaxBufferSize sets the maximum buffer size used to read and decode
@@ -312,26 +307,40 @@ func WithEventCallback(cb EventCallback) connOption {
 // the child names without an increased buffer size in the client, but they work
 // by inspecting the servers' transaction logs to enumerate children instead of
 // sending an online request to a server.
-func WithMaxBufferSize(maxBufferSize int) connOption {
-	return func(c *Conn) {
+func WithMaxBufferSize(maxBufferSize int) ConnOption {
+	return connOption(func(c *Conn) {
 		c.maxBufferSize = maxBufferSize
-	}
+	})
 }
 
 // WithMaxConnBufferSize sets maximum buffer size used to send and encode
 // packets to Zookeeper server. The standard Zookeeper client for java defaults
 // to a limit of 1mb. This option should be used for non-standard server setup
 // where znode is bigger than default 1mb.
-func WithMaxConnBufferSize(maxBufferSize int) connOption {
-	return func(c *Conn) {
+func WithMaxConnBufferSize(maxBufferSize int) ConnOption {
+	return connOption(func(c *Conn) {
 		c.buf = make([]byte, maxBufferSize)
-	}
+	})
 }
 
-func WithMetricReceiver(mr MetricReceiver) connOption {
-	return func(c *Conn) {
+func WithMetricReceiver(mr MetricReceiver) ConnOption {
+	return connOption(func(c *Conn) {
 		c.metricReceiver = mr
-	}
+	})
+}
+
+// WithBackoffOnReconnect enables backing off exponentially when attempting to reconnect to a ZK
+// server after a connection loss. The algorithm used is the [exponential backoff and jitter]
+// algorithm which backs off exponentially longer any time a connection attempt fails, up to a
+// maximum backoff duration. If initialBackoff is 0, a random duration up to the maxBackoff will be
+// chosen. If maxBackoff is 0, the feature is disabled.
+//
+// [exponential backoff and jitter]: https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
+func WithBackoffOnReconnect(initialBackoff, maxBackoff time.Duration) ConnOption {
+	return connOption(func(c *Conn) {
+		c.reconnectInitialBackoff = initialBackoff
+		c.reconnectMaxBackoff = maxBackoff
+	})
 }
 
 // Close will submit a close request with ZK and signal the connection to stop
@@ -359,13 +368,12 @@ func (c *Conn) SessionID() int64 {
 
 // SetLogger sets the logger to be used for printing errors.
 // Logger is an interface provided by this package.
-func (c *Conn) SetLogger(l Logger) {
+func (c *Conn) SetLogger(l *slog.Logger) {
 	c.logger = l
 }
 
-func (c *Conn) setTimeouts(sessionTimeoutMs int32) {
-	c.sessionTimeoutMs = sessionTimeoutMs
-	sessionTimeout := time.Duration(sessionTimeoutMs) * time.Millisecond
+func (c *Conn) setTimeouts(sessionTimeout time.Duration) {
+	c.sessionTimeout = sessionTimeout
 	c.recvTimeout = sessionTimeout * 2 / 3
 	c.pingInterval = c.recvTimeout / 2
 }
@@ -389,7 +397,7 @@ func (c *Conn) sendEvent(evt Event) {
 
 func (c *Conn) connect() error {
 	var retryStart bool
-	for {
+	for attempt := 0; ; attempt++ {
 		c.serverMu.Lock()
 		c.server, retryStart = c.hostProvider.Next()
 		c.serverMu.Unlock()
@@ -408,17 +416,50 @@ func (c *Conn) connect() error {
 			}
 		}
 
-		zkConn, err := c.dialer("tcp", c.Server(), c.connectTimeout)
-		if err == nil {
-			c.conn = zkConn
-			c.setState(StateConnected)
-			if c.logInfo {
-				c.logger.Printf("connected to %s", c.Server())
+		dial := func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), c.connectTimeout)
+			defer cancel()
+
+			c.logger.Info("Dialing ZK server", "server", c.Server())
+			zkConn, err := c.dialer.DialContext(ctx, "tcp", c.Server())
+			if err == nil {
+				c.conn = zkConn
+				c.setState(StateConnected)
+				c.logger.Info("Connection established", "server", c.Server())
+				return nil
 			}
+
+			c.logger.Warn("Failed to connect to ZK server", "server", c.Server(), "err", err)
+			return err
+		}
+		if dial() == nil {
 			return nil
 		}
+		time.Sleep(addJitter(computeBackoff(attempt, c.reconnectInitialBackoff, c.reconnectMaxBackoff)))
+	}
+}
 
-		c.logger.Printf("failed to connect to %s: %v", c.Server(), err)
+// computeBackoff computes the backoff for the given attempt given the initial and maximum backoff
+// durations (see WithBackoffOnReconnect for documentation on algorithm). If initialBackoff is 0,
+// returns maxBackoff. If maxBackoff is 0, returns 0.
+func computeBackoff(attempt int, initialBackoff, maxBackoff time.Duration) time.Duration {
+	if initialBackoff == 0 {
+		return maxBackoff
+	}
+	backoff := initialBackoff << attempt
+	if backoff < initialBackoff /* check for overflow from left shift */ || backoff > maxBackoff {
+		backoff = maxBackoff
+	}
+	return backoff
+}
+
+// addJitter returns a random duration between 0 and backoff (see linked docs in
+// WithBackoffOnReconnect on why this jitter is added).
+func addJitter(backoff time.Duration) time.Duration {
+	if backoff == 0 {
+		return 0
+	} else {
+		return time.Duration(mathrand.Int63n(int64(backoff)))
 	}
 }
 
@@ -454,18 +495,18 @@ func (c *Conn) loop(ctx context.Context) {
 			return
 		}
 
-		err := c.authenticate()
+		var sendLoopErr, recvLoopErr error
+
+		authErr := c.authenticate()
 		switch {
-		case err == ErrSessionExpired:
-			c.logger.Printf("authentication failed: %s", err)
-			c.invalidateWatches(err)
-		case err != nil && c.conn != nil:
-			c.logger.Printf("authentication failed: %s", err)
+		case errors.Is(authErr, ErrSessionExpired):
+			c.logger.Warn("authentication failed", "err", authErr)
+			c.invalidateWatches(authErr)
+		case authErr != nil && c.conn != nil:
+			c.logger.Warn("authentication failed", "err", authErr)
 			c.conn.Close()
-		case err == nil:
-			if c.logInfo {
-				c.logger.Printf("authenticated: id=%d, timeout=%d", c.SessionID(), c.sessionTimeoutMs)
-			}
+		case authErr == nil:
+			c.logger.Info("authenticated", "sessionId", c.SessionID(), "timeout", c.sessionTimeout)
 			c.hostProvider.Connected()        // mark success
 			c.closeChan = make(chan struct{}) // channel to tell send loop stop
 
@@ -476,13 +517,15 @@ func (c *Conn) loop(ctx context.Context) {
 				defer c.conn.Close() // causes recv loop to EOF/exit
 				defer wg.Done()
 
-				if err := c.resendZkAuthFn(ctx, c); err != nil {
-					c.logger.Printf("error in resending auth creds: %v", err)
+				if sendLoopErr = c.resendZkAuthFn(ctx, c); sendLoopErr != nil {
+					c.logger.Warn("error in resending auth creds", "err", sendLoopErr)
 					return
 				}
 
-				if err := c.sendLoop(); err != nil || c.logInfo {
-					c.logger.Printf("send loop terminated: %v", err)
+				if sendLoopErr = c.sendLoop(); sendLoopErr != nil {
+					c.logger.Warn("Send loop terminated with error", "err", sendLoopErr)
+				} else {
+					c.logger.Info("Send loop terminated")
 				}
 			}()
 
@@ -491,16 +534,22 @@ func (c *Conn) loop(ctx context.Context) {
 				defer close(c.closeChan) // tell send loop to exit
 				defer wg.Done()
 
-				var err error
 				if c.debugCloseRecvLoop {
-					err = errors.New("DEBUG: close recv loop")
+					recvLoopErr = errors.New("DEBUG: close recv loop")
 				} else {
-					err = c.recvLoop(c.conn)
+					recvLoopErr = c.recvLoop(c.conn)
 				}
-				if err != io.EOF || c.logInfo {
-					c.logger.Printf("recv loop terminated: %v", err)
+
+				switch {
+				case errors.Is(recvLoopErr, io.EOF):
+					c.logger.Info("recv loop terminated")
+
 				}
-				if err == nil {
+				if recvLoopErr != io.EOF {
+					c.logger.Warn("recv loop terminated with error", "err", recvLoopErr)
+				} else {
+				}
+				if recvLoopErr == nil {
 					panic("zk: recvLoop should never return nil error")
 				}
 			}()
@@ -518,8 +567,14 @@ func (c *Conn) loop(ctx context.Context) {
 		default:
 		}
 
-		if err != ErrSessionExpired {
-			err = ErrConnectionClosed
+		// Surface an error that contains all errors that could have caused the connection to get closed
+		err := errors.Join(authErr, sendLoopErr, recvLoopErr)
+		if !errors.Is(err, ErrSessionExpired) || errors.Is(err, ErrConnectionClosed) {
+			// Always default to ErrConnectionClosed for any error that doesn't already have it or
+			// ErrSessionExpired as a cause, makes error handling more straightforward. Note that by definition,
+			// reaching this point in the code means the connection was closed, hence using it as the default
+			// value.
+			err = errors.Join(ErrConnectionClosed, err)
 		}
 		c.flushRequests(err)
 
@@ -614,7 +669,7 @@ func (c *Conn) invalidateWatches(err error) {
 
 	if len(c.watchers) > 0 {
 		for pathType, watchers := range c.watchers {
-			if err == ErrSessionExpired && pathType.wType.isPersistent() {
+			if errors.Is(err, ErrSessionExpired) && pathType.wType.isPersistent() {
 				// Ignore ErrSessionExpired for persistent watchers as the client will either automatically reconnect,
 				// or this is a shutdown-worthy error in which case there will be a followup invocation of this method
 				// with ErrClosing
@@ -639,6 +694,8 @@ func (c *Conn) sendSetWatches() {
 	if len(c.watchers) == 0 {
 		return
 	}
+
+	c.logger.Info("Resetting watches after reconnect", "watchCount", len(c.watchers))
 
 	// NB: A ZK server, by default, rejects packets >1mb. So, if we have too
 	// many watches to reset, we need to break this up into multiple packets
@@ -734,7 +791,7 @@ func (c *Conn) sendSetWatches() {
 				}
 			})
 			if err != nil {
-				c.logger.Printf("Failed to set previous watches: %v", err)
+				c.logger.Warn("Failed to set previous watches", "err", err)
 				break
 			}
 		}
@@ -748,9 +805,10 @@ func (c *Conn) authenticate() error {
 	n, err := encodePacket(buf[4:], &connectRequest{
 		ProtocolVersion: protocolVersion,
 		LastZxidSeen:    c.lastZxid,
-		TimeOut:         c.sessionTimeoutMs,
-		SessionID:       c.SessionID(),
-		Passwd:          c.passwd,
+		// The timeout in the connect request is milliseconds
+		TimeOut:   int32(c.sessionTimeout / time.Millisecond),
+		SessionID: c.SessionID(),
+		Passwd:    c.passwd,
 	})
 	if err != nil {
 		return err
@@ -797,7 +855,7 @@ func (c *Conn) authenticate() error {
 	}
 
 	atomic.StoreInt64(&c.sessionID, r.SessionID)
-	c.setTimeouts(r.TimeOut)
+	c.setTimeouts(time.Duration(r.TimeOut) * time.Millisecond)
 	c.passwd = r.Passwd
 	c.setState(StateHasSession)
 
@@ -886,17 +944,20 @@ func (c *Conn) recvLoop(conn net.Conn) error {
 	for {
 		// package length
 		if err := conn.SetReadDeadline(time.Now().Add(c.recvTimeout)); err != nil {
-			c.logger.Printf("failed to set connection deadline: %v", err)
+			c.logger.Warn("failed to set connection deadline", "err", err)
 		}
 		_, err := io.ReadFull(conn, buf[:4])
 		if err != nil {
-			return fmt.Errorf("failed to read from connection: %v", err)
+			return fmt.Errorf("failed to read from connection: %w", err)
 		}
 
 		blen := int(binary.BigEndian.Uint32(buf[:4]))
 		if cap(buf) < blen {
 			if c.maxBufferSize > 0 && blen > c.maxBufferSize {
-				return fmt.Errorf("received packet from server with length %d, which exceeds max buffer size %d", blen, c.maxBufferSize)
+				return fmt.Errorf(
+					"%w (packet size %d, max buffer size: %d)",
+					ErrResponseBufferSizeExceeded, blen, c.maxBufferSize,
+				)
 			}
 			buf = make([]byte, blen)
 		}
@@ -938,7 +999,7 @@ func (c *Conn) recvLoop(conn net.Conn) error {
 				Timestamp: time.Now(),
 			})
 		} else if res.Xid < 0 {
-			c.logger.Printf("Xid < 0 (%d) but not ping or watcher event", res.Xid)
+			c.logger.Warn("Xid < 0 but not ping or watcher event", "Xid", res.Xid)
 		} else {
 			if res.Zxid > 0 {
 				c.lastZxid = res.Zxid
@@ -952,7 +1013,7 @@ func (c *Conn) recvLoop(conn net.Conn) error {
 			c.requestsLock.Unlock()
 
 			if !ok {
-				c.logger.Printf("Response for unknown request with xid %d", res.Xid)
+				c.logger.Warn("Ignoring response for unknown request", "xid", res.Xid)
 			} else {
 				if res.Err != 0 {
 					err = res.Err.toError()
@@ -1002,7 +1063,7 @@ func (c *Conn) queueRequest(opcode int32, req interface{}, res interface{}, recv
 		select {
 		case c.sendChan <- rq:
 		case <-time.After(c.connectTimeout * 2):
-			c.logger.Printf("gave up trying to send opClose to server")
+			c.logger.Warn("gave up trying to send opClose to server")
 			rq.recvChan <- response{-1, ErrConnectionClosed}
 		}
 	default:
@@ -1079,7 +1140,7 @@ func (c *Conn) Children(path string) ([]string, *Stat, error) {
 
 	res := &getChildren2Response{}
 	_, err := c.request(opGetChildren2, &getChildren2Request{Path: path, Watch: false}, res, nil)
-	if err == ErrConnectionClosed {
+	if errors.Is(err, ErrConnectionClosed) {
 		return nil, nil, err
 	}
 	return res.Children, res.Stat, err
@@ -1113,7 +1174,7 @@ func (c *Conn) Get(path string) ([]byte, *Stat, error) {
 
 	res := &getDataResponse{}
 	_, err := c.request(opGetData, &getDataRequest{Path: path, Watch: false}, res, nil)
-	if err == ErrConnectionClosed {
+	if errors.Is(err, ErrConnectionClosed) {
 		return nil, nil, err
 	}
 	return res.Data, res.Stat, err
@@ -1147,7 +1208,7 @@ func (c *Conn) Set(path string, data []byte, version int32) (*Stat, error) {
 
 	res := &setDataResponse{}
 	_, err := c.request(opSetData, &SetDataRequest{path, data, version}, res, nil)
-	if err == ErrConnectionClosed {
+	if errors.Is(err, ErrConnectionClosed) {
 		return nil, err
 	}
 	return res.Stat, err
@@ -1168,7 +1229,7 @@ func (c *Conn) Create(path string, data []byte, flags int32, acl []ACL) (string,
 
 	res := &createResponse{}
 	_, err := c.request(opCreate, &CreateRequest{path, data, acl, flags}, res, nil)
-	if err == ErrConnectionClosed {
+	if errors.Is(err, ErrConnectionClosed) {
 		return "", err
 	}
 	return res.Path, err
@@ -1186,7 +1247,7 @@ func (c *Conn) CreateAndReturnStat(path string, data []byte, flags int32, acl []
 
 	res := &create2Response{}
 	_, err := c.request(opCreate2, &CreateRequest{path, data, acl, flags}, res, nil)
-	if err == ErrConnectionClosed {
+	if errors.Is(err, ErrConnectionClosed) {
 		return "", nil, err
 	}
 	return res.Path, res.Stat, err
@@ -1244,10 +1305,10 @@ func (c *Conn) CreateProtectedEphemeralSequential(path string, data []byte, acl 
 	var newPath string
 	for i := 0; i < 3; i++ {
 		newPath, err = c.Create(protectedPath, data, FlagEphemeral|FlagSequence, acl)
-		switch err {
-		case ErrSessionExpired:
+		switch {
+		case errors.Is(err, ErrSessionExpired):
 			// No need to search for the node since it can't exist. Just try again.
-		case ErrConnectionClosed:
+		case errors.Is(err, ErrConnectionClosed):
 			children, _, err := c.Children(rootPath)
 			if err != nil {
 				return "", err
@@ -1260,7 +1321,7 @@ func (c *Conn) CreateProtectedEphemeralSequential(path string, data []byte, acl 
 					}
 				}
 			}
-		case nil:
+		case err == nil:
 			return newPath, nil
 		default:
 			return "", err
@@ -1287,11 +1348,11 @@ func (c *Conn) Exists(path string) (bool, *Stat, error) {
 
 	res := &existsResponse{}
 	_, err := c.request(opExists, &existsRequest{Path: path, Watch: false}, res, nil)
-	if err == ErrConnectionClosed {
+	if errors.Is(err, ErrConnectionClosed) {
 		return false, nil, err
 	}
 	exists := true
-	if err == ErrNoNode {
+	if errors.Is(err, ErrNoNode) {
 		exists = false
 		err = nil
 	}
@@ -1310,12 +1371,12 @@ func (c *Conn) ExistsW(path string) (bool, *Stat, <-chan Event, error) {
 		ech = newChanEventChannel()
 		if err == nil {
 			c.addWatcher(path, watchTypeData, ech)
-		} else if err == ErrNoNode {
+		} else if errors.Is(err, ErrNoNode) {
 			c.addWatcher(path, watchTypeExist, ech)
 		}
 	})
 	exists := true
-	if err == ErrNoNode {
+	if errors.Is(err, ErrNoNode) {
 		exists = false
 		err = nil
 	}
@@ -1333,7 +1394,7 @@ func (c *Conn) GetACL(path string) ([]ACL, *Stat, error) {
 
 	res := &getAclResponse{}
 	_, err := c.request(opGetAcl, &getAclRequest{Path: path}, res, nil)
-	if err == ErrConnectionClosed {
+	if errors.Is(err, ErrConnectionClosed) {
 		return nil, nil, err
 	}
 	return res.Acl, res.Stat, err
@@ -1347,7 +1408,7 @@ func (c *Conn) SetACL(path string, acl []ACL, version int32) (*Stat, error) {
 
 	res := &setAclResponse{}
 	_, err := c.request(opSetAcl, &setAclRequest{Path: path, Acl: acl, Version: version}, res, nil)
-	if err == ErrConnectionClosed {
+	if errors.Is(err, ErrConnectionClosed) {
 		return nil, err
 	}
 	return res.Stat, err
@@ -1363,7 +1424,7 @@ func (c *Conn) Sync(path string) (string, error) {
 
 	res := &syncResponse{}
 	_, err := c.request(opSync, &syncRequest{Path: path}, res, nil)
-	if err == ErrConnectionClosed {
+	if errors.Is(err, ErrConnectionClosed) {
 		return "", err
 	}
 	return res.Path, err
@@ -1401,7 +1462,7 @@ func (c *Conn) Multi(ops ...interface{}) ([]MultiResponse, error) {
 	}
 	res := &multiResponse{}
 	_, err := c.request(opMulti, req, res, nil)
-	if err == ErrConnectionClosed {
+	if errors.Is(err, ErrConnectionClosed) {
 		return nil, err
 	}
 	mr := make([]MultiResponse, len(res.Ops))
@@ -1513,7 +1574,7 @@ func (c *Conn) AddPersistentWatch(path string, mode AddWatchMode) (ch EventQueue
 			c.addWatcher(path, wt, ch)
 		}
 	})
-	if err == ErrConnectionClosed {
+	if errors.Is(err, ErrConnectionClosed) {
 		return nil, err
 	}
 	return ch, err
@@ -1600,9 +1661,7 @@ func resendZkAuth(ctx context.Context, c *Conn) error {
 	c.credsMu.Lock()
 	defer c.credsMu.Unlock()
 
-	if c.logInfo {
-		c.logger.Printf("re-submitting `%d` credentials after reconnect", len(c.creds))
-	}
+	c.logger.Info("re-submitting credentials after reconnect", "credentialCount", len(c.creds))
 
 	for _, cred := range c.creds {
 		// return early before attempting to send request.
@@ -1621,23 +1680,23 @@ func resendZkAuth(ctx context.Context, c *Conn) error {
 			nil, /* recvFunc*/
 		)
 		if err != nil {
-			return fmt.Errorf("failed to send auth request: %v", err)
+			return fmt.Errorf("failed to send auth request: %w", err)
 		}
 
 		var res response
 		select {
 		case res = <-resChan:
 		case <-c.closeChan:
-			c.logger.Printf("recv closed, cancel re-submitting credentials")
+			c.logger.Info("recv closed, cancel re-submitting credentials")
 			return nil
 		case <-c.shouldQuit:
-			c.logger.Printf("should quit, cancel re-submitting credentials")
+			c.logger.Warn("Connection closing, cancel re-submitting credentials")
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 		if res.err != nil {
-			return fmt.Errorf("failed connection setAuth request: %v", res.err)
+			return fmt.Errorf("failed connection setAuth request: %w", res.err)
 		}
 	}
 
@@ -1662,4 +1721,10 @@ func SplitPath(path string) (dir, name string) {
 		dir, name = path[:i], path[i+1:]
 	}
 	return dir, name
+}
+
+// IsConnClosing checks if the given error returned by a Conn function is due to Close having been
+// called on the Conn, which is fatal in that no subsequent Conn operations will succeed.
+func IsConnClosing(err error) bool {
+	return errors.Is(err, ErrClosing)
 }

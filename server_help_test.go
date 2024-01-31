@@ -171,7 +171,7 @@ func (tc *TestCluster) ConnectAllTimeout(sessionTimeout time.Duration) (*Conn, <
 	return tc.ConnectWithOptions(sessionTimeout)
 }
 
-func (tc *TestCluster) ConnectWithOptions(sessionTimeout time.Duration, options ...connOption) (*Conn, <-chan Event, error) {
+func (tc *TestCluster) ConnectWithOptions(sessionTimeout time.Duration, options ...ConnOption) (*Conn, <-chan Event, error) {
 	hosts := make([]string, len(tc.Servers))
 	for i, srv := range tc.Servers {
 		hosts[i] = fmt.Sprintf("127.0.0.1:%d", srv.Port)

@@ -33,9 +33,6 @@ var ErrNoServer = errors.New("zk: could not connect to a server")
 // an invalid path. (e.g. empty path).
 var ErrInvalidPath = errors.New("zk: invalid path")
 
-// DefaultLogger uses the stdlib slog package for logging.
-var DefaultLogger = slog.Default()
-
 const (
 	bufferSize      = 1536 * 1024
 	eventChanSize   = 6
@@ -112,8 +109,6 @@ type Conn struct {
 	// Debug (for recurring re-auth hang)
 	debugCloseRecvLoop bool
 	resendZkAuthFn     func(context.Context, *Conn) error
-
-	logger *slog.Logger
 
 	buf []byte
 }
@@ -215,7 +210,6 @@ func Connect(servers []string, sessionTimeout time.Duration, options ...ConnOpti
 		requests:       make(map[int32]*request),
 		watchers:       make(map[watchPathType][]EventQueue),
 		passwd:         emptyPassword,
-		logger:         DefaultLogger,
 		buf:            make([]byte, bufferSize),
 		resendZkAuthFn: resendZkAuth,
 		metricReceiver: UnimplementedMetricReceiver{},
@@ -261,13 +255,6 @@ func WithDialer(dialer Dialer) ConnOption {
 func WithHostProvider(hostProvider HostProvider) ConnOption {
 	return connOption(func(c *Conn) {
 		c.hostProvider = hostProvider
-	})
-}
-
-// WithLogger returns a connection option specifying a non-default Logger.
-func WithLogger(logger *slog.Logger) ConnOption {
-	return connOption(func(c *Conn) {
-		c.logger = logger
 	})
 }
 
@@ -366,12 +353,6 @@ func (c *Conn) SessionID() int64 {
 	return atomic.LoadInt64(&c.sessionID)
 }
 
-// SetLogger sets the logger to be used for printing errors.
-// Logger is an interface provided by this package.
-func (c *Conn) SetLogger(l *slog.Logger) {
-	c.logger = l
-}
-
 func (c *Conn) setTimeouts(sessionTimeout time.Duration) {
 	c.sessionTimeout = sessionTimeout
 	c.recvTimeout = sessionTimeout * 2 / 3
@@ -416,25 +397,22 @@ func (c *Conn) connect() error {
 			}
 		}
 
-		dial := func() error {
+		dial := func() (net.Conn, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), c.connectTimeout)
 			defer cancel()
-
-			c.logger.Info("Dialing ZK server", "server", c.Server())
-			zkConn, err := c.dialer.DialContext(ctx, "tcp", c.Server())
-			if err == nil {
-				c.conn = zkConn
-				c.setState(StateConnected)
-				c.logger.Info("Connection established", "server", c.Server())
-				return nil
-			}
-
-			c.logger.Warn("Failed to connect to ZK server", "server", c.Server(), "err", err)
-			return err
+			return c.dialer.DialContext(ctx, "tcp", c.Server())
 		}
-		if dial() == nil {
+
+		slog.Info("Dialing ZK server", "server", c.Server())
+		zkConn, err := dial()
+		if err == nil {
+			c.conn = zkConn
+			c.setState(StateConnected)
+			slog.Info("Connection established", "server", c.Server())
 			return nil
 		}
+
+		slog.Warn("Failed to connect to ZK server", "server", c.Server(), "err", err)
 		time.Sleep(addJitter(computeBackoff(attempt, c.reconnectInitialBackoff, c.reconnectMaxBackoff)))
 	}
 }
@@ -500,13 +478,13 @@ func (c *Conn) loop(ctx context.Context) {
 		authErr := c.authenticate()
 		switch {
 		case errors.Is(authErr, ErrSessionExpired):
-			c.logger.Warn("authentication failed", "err", authErr)
+			slog.Warn("authentication failed", "err", authErr)
 			c.invalidateWatches(authErr)
 		case authErr != nil && c.conn != nil:
-			c.logger.Warn("authentication failed", "err", authErr)
+			slog.Warn("authentication failed", "err", authErr)
 			c.conn.Close()
 		case authErr == nil:
-			c.logger.Info("authenticated", "sessionId", c.SessionID(), "timeout", c.sessionTimeout)
+			slog.Info("authenticated", "sessionId", c.SessionID(), "timeout", c.sessionTimeout)
 			c.hostProvider.Connected()        // mark success
 			c.closeChan = make(chan struct{}) // channel to tell send loop stop
 
@@ -518,14 +496,14 @@ func (c *Conn) loop(ctx context.Context) {
 				defer wg.Done()
 
 				if sendLoopErr = c.resendZkAuthFn(ctx, c); sendLoopErr != nil {
-					c.logger.Warn("error in resending auth creds", "err", sendLoopErr)
+					slog.Warn("error in resending auth creds", "err", sendLoopErr)
 					return
 				}
 
 				if sendLoopErr = c.sendLoop(); sendLoopErr != nil {
-					c.logger.Warn("Send loop terminated with error", "err", sendLoopErr)
+					slog.Warn("Send loop terminated with error", "err", sendLoopErr)
 				} else {
-					c.logger.Info("Send loop terminated")
+					slog.Info("Send loop terminated")
 				}
 			}()
 
@@ -542,11 +520,11 @@ func (c *Conn) loop(ctx context.Context) {
 
 				switch {
 				case errors.Is(recvLoopErr, io.EOF):
-					c.logger.Info("recv loop terminated")
+					slog.Info("recv loop terminated")
 
 				}
 				if recvLoopErr != io.EOF {
-					c.logger.Warn("recv loop terminated with error", "err", recvLoopErr)
+					slog.Warn("recv loop terminated with error", "err", recvLoopErr)
 				} else {
 				}
 				if recvLoopErr == nil {
@@ -695,7 +673,7 @@ func (c *Conn) sendSetWatches() {
 		return
 	}
 
-	c.logger.Info("Resetting watches after reconnect", "watchCount", len(c.watchers))
+	slog.Info("Resetting watches after reconnect", "watchCount", len(c.watchers))
 
 	// NB: A ZK server, by default, rejects packets >1mb. So, if we have too
 	// many watches to reset, we need to break this up into multiple packets
@@ -791,7 +769,7 @@ func (c *Conn) sendSetWatches() {
 				}
 			})
 			if err != nil {
-				c.logger.Warn("Failed to set previous watches", "err", err)
+				slog.Warn("Failed to set previous watches", "err", err)
 				break
 			}
 		}
@@ -944,7 +922,7 @@ func (c *Conn) recvLoop(conn net.Conn) error {
 	for {
 		// package length
 		if err := conn.SetReadDeadline(time.Now().Add(c.recvTimeout)); err != nil {
-			c.logger.Warn("failed to set connection deadline", "err", err)
+			slog.Warn("failed to set connection deadline", "err", err)
 		}
 		_, err := io.ReadFull(conn, buf[:4])
 		if err != nil {
@@ -999,7 +977,7 @@ func (c *Conn) recvLoop(conn net.Conn) error {
 				Timestamp: time.Now(),
 			})
 		} else if res.Xid < 0 {
-			c.logger.Warn("Xid < 0 but not ping or watcher event", "Xid", res.Xid)
+			slog.Warn("Xid < 0 but not ping or watcher event", "Xid", res.Xid)
 		} else {
 			if res.Zxid > 0 {
 				c.lastZxid = res.Zxid
@@ -1013,7 +991,7 @@ func (c *Conn) recvLoop(conn net.Conn) error {
 			c.requestsLock.Unlock()
 
 			if !ok {
-				c.logger.Warn("Ignoring response for unknown request", "xid", res.Xid)
+				slog.Warn("Ignoring response for unknown request", "xid", res.Xid)
 			} else {
 				if res.Err != 0 {
 					err = res.Err.toError()
@@ -1063,7 +1041,7 @@ func (c *Conn) queueRequest(opcode int32, req interface{}, res interface{}, recv
 		select {
 		case c.sendChan <- rq:
 		case <-time.After(c.connectTimeout * 2):
-			c.logger.Warn("gave up trying to send opClose to server")
+			slog.Warn("gave up trying to send opClose to server")
 			rq.recvChan <- response{-1, ErrConnectionClosed}
 		}
 	default:
@@ -1661,7 +1639,7 @@ func resendZkAuth(ctx context.Context, c *Conn) error {
 	c.credsMu.Lock()
 	defer c.credsMu.Unlock()
 
-	c.logger.Info("re-submitting credentials after reconnect", "credentialCount", len(c.creds))
+	slog.Info("re-submitting credentials after reconnect", "credentialCount", len(c.creds))
 
 	for _, cred := range c.creds {
 		// return early before attempting to send request.
@@ -1687,10 +1665,10 @@ func resendZkAuth(ctx context.Context, c *Conn) error {
 		select {
 		case res = <-resChan:
 		case <-c.closeChan:
-			c.logger.Info("recv closed, cancel re-submitting credentials")
+			slog.Info("recv closed, cancel re-submitting credentials")
 			return nil
 		case <-c.shouldQuit:
-			c.logger.Warn("Connection closing, cancel re-submitting credentials")
+			slog.Warn("Connection closing, cancel re-submitting credentials")
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()

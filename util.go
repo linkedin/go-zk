@@ -49,6 +49,13 @@ func FormatServers(servers []string) []string {
 	return srvs
 }
 
+// shuffleSlice invokes rand.Shuffle on the given slice.
+func shuffleSlice[T any](s []T) {
+	rand.Shuffle(len(s), func(i, j int) {
+		s[i], s[j] = s[j], s[i]
+	})
+}
+
 // validatePath will make sure a path is valid before sending the request
 func validatePath(path string, isSequential bool) error {
 	if path == "" {
@@ -108,11 +115,4 @@ func validatePath(path string, isSequential bool) error {
 		w = width
 	}
 	return nil
-}
-
-// shuffleSlice invokes rand.Shuffle on the given slice.
-func shuffleSlice[T any](s []T) {
-	rand.Shuffle(len(s), func(i, j int) {
-		s[i], s[j] = s[j], s[i]
-	})
 }

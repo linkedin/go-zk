@@ -27,11 +27,15 @@ func (hp *hostPort) String() string {
 // as a pound-for-pound copy of the standard Java client's equivalent:
 // https://github.com/linkedin/zookeeper/blob/629518b5ea2b26d88a9ec53d5a422afe9b12e452/zookeeper-server/src/main/java/org/apache/zookeeper/client/StaticHostProvider.java#L368
 type StaticHostProvider struct {
-	mu         sync.Mutex // Protects everything, so we can add asynchronous updates later.
-	servers    []hostPort
-	curr       int
-	last       int
-	lookupHost func(string) ([]string, error) // Override of net.LookupHost, for testing.
+	mu      sync.Mutex // Protects everything, so we can add asynchronous updates later.
+	servers []hostPort
+	// nextServer is the index (in servers) of the next server that will be returned by Next.
+	nextServer int
+	// lastConnectedServer is the index (in servers) of the last server to which a successful connection
+	// was established. Used to track whether Next iterated through all available servers without
+	// successfully connecting.
+	lastConnectedServer int
+	lookupHost          func(string) ([]string, error) // Override of net.LookupHost, for testing.
 }
 
 func (shp *StaticHostProvider) Init(servers []string) error {
@@ -66,8 +70,8 @@ func (shp *StaticHostProvider) Init(servers []string) error {
 	shuffleSlice(found)
 
 	shp.servers = found
-	shp.curr = 0
-	shp.last = len(shp.servers) - 1
+	shp.nextServer = 0
+	shp.lastConnectedServer = len(shp.servers) - 1
 
 	return nil
 }
@@ -78,9 +82,9 @@ func (shp *StaticHostProvider) Init(servers []string) error {
 func (shp *StaticHostProvider) Next() (server string, retryStart bool) {
 	shp.mu.Lock()
 	defer shp.mu.Unlock()
-	retryStart = shp.curr == shp.last
+	retryStart = shp.nextServer == shp.lastConnectedServer
 
-	next := shp.servers[shp.curr]
+	next := shp.servers[shp.nextServer]
 	addrs, err := shp.lookupHost(next.host)
 	if len(addrs) == 0 {
 		if err == nil {
@@ -94,7 +98,7 @@ func (shp *StaticHostProvider) Next() (server string, retryStart bool) {
 		server = addrs[rand.Intn(len(addrs))] + ":" + next.port
 	}
 
-	shp.curr = (shp.curr + 1) % len(shp.servers)
+	shp.nextServer = (shp.nextServer + 1) % len(shp.servers)
 
 	return server, retryStart
 }
@@ -103,9 +107,9 @@ func (shp *StaticHostProvider) Next() (server string, retryStart bool) {
 func (shp *StaticHostProvider) Connected() {
 	shp.mu.Lock()
 	defer shp.mu.Unlock()
-	if shp.curr == 0 {
-		shp.last = len(shp.servers) - 1
+	if shp.nextServer == 0 {
+		shp.lastConnectedServer = len(shp.servers) - 1
 	} else {
-		shp.last = shp.curr - 1
+		shp.lastConnectedServer = shp.nextServer - 1
 	}
 }

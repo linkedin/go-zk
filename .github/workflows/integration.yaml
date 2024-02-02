@@ -1,27 +1,28 @@
-name: unittest
+name: integration_test
 on: [push, pull_request]
 
 jobs:
-  unittest:
-    name: unittest
+  integration_test:
+    name: integration_test
     strategy:
       matrix:
-        zk-version: [3.5.8, 3.6.1]
-        go-version: [1.13.x, 1.14.x]
+        zk-version: [3.5.8, 3.6.3]
+        go-version: ['oldstable', 'stable']
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Go
-        uses: actions/setup-go@v1
+      - name: Go ${{ matrix.go }} setup
+        uses: actions/setup-go@v4
         with:
             go-version: ${{ matrix.go-version }} 
 
-      - name: Setup Java
-        uses: actions/setup-java@v1
+      - name: Setup Java 14
+        uses: actions/setup-java@v3
         with:
+          distribution: 'zulu'
           java-version: 14
 
       - name: Checkout code
-        uses: actions/checkout@v1
+        uses: actions/checkout@v3
 
       - name: Test code
         run: make test ZK_VERSION=${{ matrix.zk-version }}

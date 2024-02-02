@@ -296,7 +296,7 @@ func requireNoErrorf(t *testing.T, err error, msgAndArgs ...interface{}) {
 func RequireMinimumZkVersion(t *testing.T, minimum string) {
 	if val, ok := os.LookupEnv("ZK_VERSION"); ok {
 		split := func(v string) (parts []int) {
-			for _, s := range strings.Split(minimum, ".") {
+			for _, s := range strings.Split(v, ".") {
 				i, err := strconv.Atoi(s)
 				if err != nil {
 					t.Fatalf("invalid version segment: %q", s)

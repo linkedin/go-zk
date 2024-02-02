@@ -1,10 +1,5 @@
 name: lint
-
-on:
-  push:
-    branches:
-      - master
-  pull_request:
+on: [push, pull_request]
 
 jobs:
   lint:
@@ -16,9 +11,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Install go
         uses: actions/setup-go@v4
         with:
           go-version: ${{ matrix.go-version }}
+
       - name: Lint code
         uses: golangci/golangci-lint-action@v3

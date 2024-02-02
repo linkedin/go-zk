@@ -173,12 +173,11 @@ type Event struct {
 type HostProvider interface {
 	// Init is called first, with the servers specified in the connection string.
 	Init(servers []string) error
-	// Len returns the number of servers.
-	Len() int
-	// Next returns the next server to connect to. retryStart will be true if we've looped through
-	// all known servers without Connected() being called.
+	// Next returns the next server to connect to. retryStart should be true if this call to Next
+	// exhausted the list of known servers without Connected being called. If connecting to this final
+	// host fails, the connect loop will back off before invoking Next again for a fresh server.
 	Next() (server string, retryStart bool)
-	// Notify the HostProvider of a successful connection.
+	// Connected notifies the HostProvider of a successful connection.
 	Connected()
 }
 
@@ -203,12 +202,12 @@ func Connect(servers []string, sessionTimeout time.Duration, options ...connOpti
 	srvs := FormatServers(servers)
 
 	// Randomize the order of the servers to avoid creating hotspots
-	stringShuffle(srvs)
+	shuffleSlice(srvs)
 
 	ec := make(chan Event, eventChanSize)
 	conn := &Conn{
 		dialer:         net.DialTimeout,
-		hostProvider:   &DNSHostProvider{},
+		hostProvider:   new(StaticHostProvider),
 		conn:           nil,
 		state:          StateDisconnected,
 		eventChan:      ec,
@@ -387,7 +386,7 @@ func (c *Conn) sendEvent(evt Event) {
 	}
 }
 
-func (c *Conn) connect() error {
+func (c *Conn) connect() (err error) {
 	var retryStart bool
 	for {
 		c.serverMu.Lock()
@@ -395,18 +394,6 @@ func (c *Conn) connect() error {
 		c.serverMu.Unlock()
 
 		c.setState(StateConnecting)
-
-		if retryStart {
-			c.flushUnsentRequests(ErrNoServer)
-			select {
-			case <-time.After(time.Second):
-				// pass
-			case <-c.shouldQuit:
-				c.setState(StateDisconnected)
-				c.flushUnsentRequests(ErrClosing)
-				return ErrClosing
-			}
-		}
 
 		zkConn, err := c.dialer("tcp", c.Server(), c.connectTimeout)
 		if err == nil {
@@ -419,6 +406,18 @@ func (c *Conn) connect() error {
 		}
 
 		c.logger.Printf("failed to connect to %s: %v", c.Server(), err)
+
+		if retryStart {
+			c.flushUnsentRequests(ErrNoServer)
+			select {
+			case <-time.After(time.Second):
+				// pass
+			case <-c.shouldQuit:
+				c.setState(StateDisconnected)
+				c.flushUnsentRequests(ErrClosing)
+				return ErrClosing
+			}
+		}
 	}
 }
 

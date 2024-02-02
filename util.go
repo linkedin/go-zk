@@ -4,7 +4,6 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
-	"math/rand"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -47,14 +46,6 @@ func FormatServers(servers []string) []string {
 		}
 	}
 	return srvs
-}
-
-// stringShuffle performs a Fisher-Yates shuffle on a slice of strings
-func stringShuffle(s []string) {
-	for i := len(s) - 1; i > 0; i-- {
-		j := rand.Intn(i + 1)
-		s[i], s[j] = s[j], s[i]
-	}
 }
 
 // validatePath will make sure a path is valid before sending the request

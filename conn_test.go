@@ -255,31 +255,3 @@ func TestNotifyWatches(t *testing.T) {
 		})
 	}
 }
-
-func TestComputeBackoff(t *testing.T) {
-	checkBackoff := func(expected, actual time.Duration) {
-		if expected != actual {
-			t.Fatalf("Unepected backoff: expected=%v actual=%v", expected, actual)
-		}
-	}
-	const (
-		initialBackoff = 1 * time.Millisecond
-		maxBackoff     = time.Second
-	)
-	checkBackoff(maxBackoff, computeBackoff(0, 0, maxBackoff))
-	checkBackoff(0, computeBackoff(0, initialBackoff, 0))
-
-	expected := initialBackoff
-	// Going up to 1000 _should_ overflow the exponential backoff, so this checks that it handles it correctly
-	for attempt := 0; attempt < 1000; attempt++ {
-		actual := computeBackoff(attempt, initialBackoff, maxBackoff)
-		checkBackoff(expected, actual)
-		expected *= 2
-		if expected > maxBackoff {
-			expected = maxBackoff
-		}
-	}
-
-	// rand.Int63n panics when given 0, so this checks that this correctly guards against that.
-	checkBackoff(0, addJitter(0))
-}

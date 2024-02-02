@@ -172,10 +172,9 @@ type Event struct {
 type HostProvider interface {
 	// Init is called first, with the servers specified in the connection string.
 	Init(servers []string) error
-	// Len returns the number of servers.
-	Len() int
-	// Next returns the next server to connect to. retryStart will be true if we've looped through
-	// all known servers without Connected() being called.
+	// Next returns the next server to connect to. retryStart should be true if this call to Next
+	// exhausted the list of known servers without Connected being called. If connecting to this final
+	// host fails, the connect loop will back off before invoking Next again for a fresh server.
 	Next() (server string, retryStart bool)
 	// Connected notifies the HostProvider of a successful connection.
 	Connected()
@@ -195,12 +194,12 @@ func Connect(servers []string, sessionTimeout time.Duration, options ...ConnOpti
 	srvs := FormatServers(servers)
 
 	// Randomize the order of the servers to avoid creating hotspots
-	stringShuffle(srvs)
+	mathrand.Shuffle(len(srvs), func(i, j int) { srvs[i], srvs[j] = srvs[j], srvs[i] })
 
 	ec := make(chan Event, eventChanSize)
 	conn := &Conn{
 		dialer:         new(net.Dialer),
-		hostProvider:   &DNSHostProvider{},
+		hostProvider:   NewDynamicDNSHostProvider(),
 		conn:           nil,
 		state:          StateDisconnected,
 		eventChan:      ec,
@@ -316,20 +315,6 @@ func WithMetricReceiver(mr MetricReceiver) ConnOption {
 	})
 }
 
-// WithBackoffOnReconnect enables backing off exponentially when attempting to reconnect to a ZK
-// server after a connection loss. The algorithm used is the [exponential backoff and jitter]
-// algorithm which backs off exponentially longer any time a connection attempt fails, up to a
-// maximum backoff duration. If initialBackoff is 0, a random duration up to the maxBackoff will be
-// chosen. If maxBackoff is 0, the feature is disabled.
-//
-// [exponential backoff and jitter]: https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
-func WithBackoffOnReconnect(initialBackoff, maxBackoff time.Duration) ConnOption {
-	return connOption(func(c *Conn) {
-		c.reconnectInitialBackoff = initialBackoff
-		c.reconnectMaxBackoff = maxBackoff
-	})
-}
-
 // Close will submit a close request with ZK and signal the connection to stop
 // sending and receiving packets.
 func (c *Conn) Close() {
@@ -376,26 +361,14 @@ func (c *Conn) sendEvent(evt Event) {
 	}
 }
 
-func (c *Conn) connect() error {
+func (c *Conn) connect() (err error) {
 	var retryStart bool
-	for attempt := 0; ; attempt++ {
+	for {
 		c.serverMu.Lock()
 		c.server, retryStart = c.hostProvider.Next()
 		c.serverMu.Unlock()
 
 		c.setState(StateConnecting)
-
-		if retryStart {
-			c.flushUnsentRequests(ErrNoServer)
-			select {
-			case <-time.After(time.Second):
-				// pass
-			case <-c.shouldQuit:
-				c.setState(StateDisconnected)
-				c.flushUnsentRequests(ErrClosing)
-				return ErrClosing
-			}
-		}
 
 		dial := func() (net.Conn, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), c.connectTimeout)
@@ -408,36 +381,23 @@ func (c *Conn) connect() error {
 		if err == nil {
 			c.conn = zkConn
 			c.setState(StateConnected)
-			slog.Info("Connection established", "server", c.Server())
+			slog.Info("Connection established", "server", c.Server(), "addr", zkConn.RemoteAddr())
 			return nil
 		}
 
 		slog.Warn("Failed to connect to ZK server", "server", c.Server(), "err", err)
-		time.Sleep(addJitter(computeBackoff(attempt, c.reconnectInitialBackoff, c.reconnectMaxBackoff)))
-	}
-}
 
-// computeBackoff computes the backoff for the given attempt given the initial and maximum backoff
-// durations (see WithBackoffOnReconnect for documentation on algorithm). If initialBackoff is 0,
-// returns maxBackoff. If maxBackoff is 0, returns 0.
-func computeBackoff(attempt int, initialBackoff, maxBackoff time.Duration) time.Duration {
-	if initialBackoff == 0 {
-		return maxBackoff
-	}
-	backoff := initialBackoff << attempt
-	if backoff < initialBackoff /* check for overflow from left shift */ || backoff > maxBackoff {
-		backoff = maxBackoff
-	}
-	return backoff
-}
-
-// addJitter returns a random duration between 0 and backoff (see linked docs in
-// WithBackoffOnReconnect on why this jitter is added).
-func addJitter(backoff time.Duration) time.Duration {
-	if backoff == 0 {
-		return 0
-	} else {
-		return time.Duration(mathrand.Int63n(int64(backoff)))
+		if retryStart {
+			c.flushUnsentRequests(ErrNoServer)
+			select {
+			case <-time.After(time.Second):
+				// pass
+			case <-c.shouldQuit:
+				c.setState(StateDisconnected)
+				c.flushUnsentRequests(ErrClosing)
+				return ErrClosing
+			}
+		}
 	}
 }
 

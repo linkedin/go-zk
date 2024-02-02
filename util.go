@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
+	"math/rand"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -107,4 +108,11 @@ func validatePath(path string, isSequential bool) error {
 		w = width
 	}
 	return nil
+}
+
+// shuffleSlice invokes rand.Shuffle on the given slice.
+func shuffleSlice[T any](s []T) {
+	rand.Shuffle(len(s), func(i, j int) {
+		s[i], s[j] = s[j], s[i]
+	})
 }

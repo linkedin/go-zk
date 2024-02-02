@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	mathrand "math/rand"
 	"net"
 	"strings"
 	"sync"
@@ -87,9 +86,6 @@ type Conn struct {
 	connectTimeout time.Duration
 	maxBufferSize  int
 	metricReceiver MetricReceiver
-
-	reconnectInitialBackoff time.Duration
-	reconnectMaxBackoff     time.Duration
 
 	creds   []authCreds
 	credsMu sync.Mutex // protects server
@@ -194,12 +190,12 @@ func Connect(servers []string, sessionTimeout time.Duration, options ...ConnOpti
 	srvs := FormatServers(servers)
 
 	// Randomize the order of the servers to avoid creating hotspots
-	mathrand.Shuffle(len(srvs), func(i, j int) { srvs[i], srvs[j] = srvs[j], srvs[i] })
+	shuffleSlice(srvs)
 
 	ec := make(chan Event, eventChanSize)
 	conn := &Conn{
 		dialer:         new(net.Dialer),
-		hostProvider:   NewDynamicDNSHostProvider(),
+		hostProvider:   new(StaticHostProvider),
 		conn:           nil,
 		state:          StateDisconnected,
 		eventChan:      ec,

@@ -165,139 +165,78 @@ func TestDNSHostProviderReconnect(t *testing.T) {
 	}
 }
 
-// TestDNSHostProviderRetryStart tests the `retryStart` functionality
-// of DNSHostProvider.
-// It's also probably the clearest visual explanation of exactly how
-// it works.
-func TestDNSHostProviderRetryStart(t *testing.T) {
+// TestHostProvidersRetryStart tests the `retryStart` functionality of DNSHostProvider and
+// StaticHostProvider.
+// It's also probably the clearest visual explanation of exactly how it works.
+func TestHostProvidersRetryStart(t *testing.T) {
 	t.Parallel()
 
-	t.Run("static", func(t *testing.T) {
-		hp := &DNSHostProvider{
-			static: true,
-			lookupHost: func(host string) ([]string, error) {
-				return []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"}, nil
-			},
-		}
+	lookupHost := func(host string) ([]string, error) {
+		return []string{host}, nil
+	}
 
-		if err := hp.Init([]string{"foo.example.com:12345"}); err != nil {
-			t.Fatal(err)
-		}
+	providers := []HostProvider{
+		&DNSHostProvider{
+			lookupHost: lookupHost,
+		},
+		&StaticHostProvider{
+			lookupHost: lookupHost,
+		},
+	}
 
-		testdata := []struct {
-			retryStartWant bool
-			callConnected  bool
-		}{
-			// Repeated failures.
-			{false, false},
-			{false, false},
-			{true, false},
-			{false, false},
-			{false, false},
-			{true, false},
-			{false, true},
-
-			// One success offsets things.
-			{false, false},
-			{false, true},
-			{false, true},
-
-			// Repeated successes.
-			{false, true},
-			{false, true},
-			{false, true},
-			{false, true},
-			{false, true},
-
-			// And some more failures.
-			{false, false},
-			{false, false},
-			{true, false}, // Looped back to last known good server: all alternates failed.
-			{false, false},
-			{false, false},
-			{true, false},
-			{false, false},
-			{false, false},
-			{true, false},
-			{false, false},
-		}
-
-		for i, td := range testdata {
-			_, retryStartGot := hp.Next()
-			if retryStartGot != td.retryStartWant {
-				t.Errorf("%d: retryStart=%v; want %v", i, retryStartGot, td.retryStartWant)
+	for _, hp := range providers {
+		t.Run(fmt.Sprintf("%T", hp), func(t *testing.T) {
+			if err := hp.Init([]string{"foo.com:2121", "bar.com:2121", "baz.com:2121"}); err != nil {
+				t.Fatal(err)
 			}
-			if td.callConnected {
-				hp.Connected()
-			}
-		}
-	})
 
-	// The above test for "static" checks that the semantics of the implementation of Next are correct,
-	// this test only checks that the "dynamic" mode correctly interacts with the resolver.
-	t.Run("dynamic", func(t *testing.T) {
-		const fooPort, barPort = "2121", "6464"
-		const fooHost, barHost = "foo.com", "bar.com"
-		hostToPort := map[string]string{
-			fooHost: fooPort,
-			barHost: barPort,
-		}
-		hostToAddrs := map[string][]string{
-			fooHost: {"0.0.0.1", "0.0.0.2", "0.0.0.3"},
-			barHost: {"0.0.0.4", "0.0.0.5", "0.0.0.6"},
-		}
-		addrToHost := map[string]string{}
-		for host, addrs := range hostToAddrs {
-			for _, addr := range addrs {
-				addrToHost[addr+":"+hostToPort[host]] = host
-			}
-		}
+			testdata := []struct {
+				retryStartWant bool
+				callConnected  bool
+			}{
+				// Repeated failures.
+				{false, false},
+				{false, false},
+				{true, false},
+				{false, false},
+				{false, false},
+				{true, false},
+				{false, true},
 
-		hp := &DNSHostProvider{
-			static: false,
-			lookupHost: func(host string) ([]string, error) {
-				addrs, ok := hostToAddrs[host]
-				if !ok {
-					t.Fatalf("Unexpected argument to lookupHost %q", host)
+				// One success offsets things.
+				{false, false},
+				{false, true},
+				{false, true},
+
+				// Repeated successes.
+				{false, true},
+				{false, true},
+				{false, true},
+				{false, true},
+				{false, true},
+
+				// And some more failures.
+				{false, false},
+				{false, false},
+				{true, false}, // Looped back to last known good server: all alternates failed.
+				{false, false},
+				{false, false},
+				{true, false},
+				{false, false},
+				{false, false},
+				{true, false},
+				{false, false},
+			}
+
+			for i, td := range testdata {
+				_, retryStartGot := hp.Next()
+				if retryStartGot != td.retryStartWant {
+					t.Errorf("%d: retryStart=%v; want %v", i, retryStartGot, td.retryStartWant)
 				}
-				return addrs, nil
-			},
-		}
-
-		err := hp.Init([]string{fooHost + ":" + fooPort, barHost + ":" + barPort})
-		if err != nil {
-			t.Fatalf("Unexpected err from Init %v", err)
-		}
-
-		addr1, retryStart := hp.Next()
-		if retryStart {
-			t.Fatalf("retryStart should be false")
-		}
-		addr2, retryStart := hp.Next()
-		if !retryStart {
-			t.Fatalf("retryStart should be true")
-		}
-		host1, host2 := addrToHost[addr1], addrToHost[addr2]
-		if host1 == host2 {
-			t.Fatalf("Next yielded addresses from same host (%q)", host1)
-		}
-
-		// Final sanity check that it is shuffling the addresses
-		seenAddresses := map[string]map[string]bool{
-			fooHost: {},
-			barHost: {},
-		}
-		for i := 0; i < 10_000; i++ {
-			addr, _ := hp.Next()
-			seenAddresses[addrToHost[addr]][addr] = true
-		}
-
-		for host, addrs := range hostToAddrs {
-			for _, addr := range addrs {
-				if !seenAddresses[host][addr+":"+hostToPort[host]] {
-					t.Fatalf("expected addr %q for host %q not seen (seen: %v)", host, addr, seenAddresses)
+				if td.callConnected {
+					hp.Connected()
 				}
 			}
-		}
-	})
+		})
+	}
 }

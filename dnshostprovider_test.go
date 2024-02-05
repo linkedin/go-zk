@@ -1,6 +1,7 @@
 package zk
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"testing"
@@ -33,7 +34,7 @@ func TestDNSHostProviderCreate(t *testing.T) {
 
 	path := "/gozk-test"
 
-	if err := zk.Delete(path, -1); err != nil && err != ErrNoNode {
+	if err := zk.Delete(path, -1); err != nil && !errors.Is(err, ErrNoNode) {
 		t.Fatalf("Delete returned error: %+v", err)
 	}
 	if p, err := zk.Create(path, []byte{1, 2, 3, 4}, 0, WorldACL(PermAll)); err != nil {

@@ -259,7 +259,7 @@ func TestIncrementalReconfig(t *testing.T) {
 
 	// remove node 3.
 	_, err = zk.IncrementalReconfig(nil, []string{"3"}, -1)
-	if err != nil && err == ErrConnectionClosed {
+	if err != nil && errors.Is(err, ErrConnectionClosed) {
 		t.Log("conneciton closed is fine since the cluster re-elects and we dont reconnect")
 	} else {
 		requireNoErrorf(t, err, "failed to remove node from cluster")
@@ -268,7 +268,7 @@ func TestIncrementalReconfig(t *testing.T) {
 	// add node a new 4th node
 	server := fmt.Sprintf("server.%d=%s:%d:%d;%d", testSrvConfig.ID, testSrvConfig.Host, testSrvConfig.PeerPort, testSrvConfig.LeaderElectionPort, cfg.ClientPort)
 	_, err = zk.IncrementalReconfig([]string{server}, nil, -1)
-	if err != nil && err == ErrConnectionClosed {
+	if err != nil && errors.Is(err, ErrConnectionClosed) {
 		t.Log("conneciton closed is fine since the cluster re-elects and we dont reconnect")
 	} else {
 		requireNoErrorf(t, err, "failed to add new server to cluster")

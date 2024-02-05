@@ -1,5 +1,5 @@
 # make file to hold the logic of build and test setup
-ZK_VERSION ?= 3.6.3
+export ZK_VERSION ?= 3.6.3
 
 # Apache changed the name of the archive in version 3.5.x and seperated out
 # src and binary packages

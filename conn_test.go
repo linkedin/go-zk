@@ -93,7 +93,6 @@ func TestDeadlockInClose(t *testing.T) {
 		shouldQuit:     make(chan struct{}),
 		connectTimeout: 1 * time.Second,
 		sendChan:       make(chan *request, sendChanSize),
-		logger:         DefaultLogger,
 	}
 
 	for i := 0; i < sendChanSize; i++ {

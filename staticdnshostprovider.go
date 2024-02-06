@@ -95,7 +95,7 @@ func (shp *StaticHostProvider) Next() (server string, retryStart bool) {
 		slog.Warn("Could not resolve ZK host", "host", next.host, "err", err)
 		server = next.String()
 	} else {
-		server = addrs[rand.Intn(len(addrs))] + ":" + next.port
+		server = net.JoinHostPort(addrs[rand.Intn(len(addrs))], next.port)
 	}
 
 	shp.nextServer = (shp.nextServer + 1) % len(shp.servers)

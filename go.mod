@@ -1,3 +1,3 @@
-module github.com/linkedin/go-zk
+module github.com/go-zookeeper/zk
 
 go 1.20

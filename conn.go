@@ -357,7 +357,7 @@ func (c *Conn) sendEvent(evt Event) {
 	}
 }
 
-func (c *Conn) connect() (err error) {
+func (c *Conn) connect() error {
 	var retryStart bool
 	for {
 		c.serverMu.Lock()

@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-func TestStateChanges(t *testing.T) {
+func TestIntegration_StateChanges(t *testing.T) {
 	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestStateChanges(t *testing.T) {
 	verifyEventOrder(eventChan, []State{StateDisconnected}, "event channel")
 }
 
-func TestCreate(t *testing.T) {
+func TestIntegration_Create(t *testing.T) {
 	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +96,7 @@ func TestCreate(t *testing.T) {
 	}
 }
 
-func TestCreateTTL(t *testing.T) {
+func TestIntegration_CreateTTL(t *testing.T) {
 	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +148,7 @@ func TestCreateTTL(t *testing.T) {
 	}
 }
 
-func TestCreateContainer(t *testing.T) {
+func TestIntegration_CreateContainer(t *testing.T) {
 	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
 	if err != nil {
 		t.Fatal(err)
@@ -185,7 +185,7 @@ func TestCreateContainer(t *testing.T) {
 	}
 }
 
-func TestIncrementalReconfig(t *testing.T) {
+func TestIntegration_IncrementalReconfig(t *testing.T) {
 	RequireMinimumZkVersion(t, "3.5")
 
 	ts, err := StartTestCluster(t, 3, nil, logWriter{t: t, p: "[ZKERR] "})
@@ -275,7 +275,7 @@ func TestIncrementalReconfig(t *testing.T) {
 	}
 }
 
-func TestReconfig(t *testing.T) {
+func TestIntegration_Reconfig(t *testing.T) {
 	RequireMinimumZkVersion(t, "3.5")
 
 	// This test enures we can do an non-incremental reconfig
@@ -320,7 +320,7 @@ func TestReconfig(t *testing.T) {
 	requireNoErrorf(t, err, "failed to reconfig cluster")
 }
 
-func TestOpsAfterCloseDontDeadlock(t *testing.T) {
+func TestIntegration_OpsAfterCloseDontDeadlock(t *testing.T) {
 	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
 	if err != nil {
 		t.Fatal(err)
@@ -351,7 +351,7 @@ func TestOpsAfterCloseDontDeadlock(t *testing.T) {
 	}
 }
 
-func TestMulti(t *testing.T) {
+func TestIntegration_Multi(t *testing.T) {
 	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
 	if err != nil {
 		t.Fatal(err)
@@ -388,8 +388,9 @@ func TestMulti(t *testing.T) {
 	}
 }
 
-func TestMultiRead(t *testing.T) {
+func TestIntegration_MultiRead(t *testing.T) {
 	RequireMinimumZkVersion(t, "3.6")
+
 	WithTestCluster(t, 10*time.Second, func(ts *TestCluster, zk *Conn) {
 		nodeChildren := map[string][]string{}
 		nodeData := map[string][]byte{}
@@ -478,8 +479,9 @@ func TestMultiRead(t *testing.T) {
 	})
 }
 
-func TestGetDataAndChildren(t *testing.T) {
+func TestIntegration_GetDataAndChildren(t *testing.T) {
 	RequireMinimumZkVersion(t, "3.6")
+
 	WithTestCluster(t, 10*time.Second, func(ts *TestCluster, zk *Conn) {
 
 		const path = "/test"
@@ -516,7 +518,7 @@ func TestGetDataAndChildren(t *testing.T) {
 	})
 }
 
-func TestIfAuthdataSurvivesReconnect(t *testing.T) {
+func TestIntegration_IfAuthdataSurvivesReconnect(t *testing.T) {
 	// This test case ensures authentication data is being resubmited after
 	// reconnect.
 	testNode := "/auth-testnode"
@@ -568,8 +570,9 @@ func TestIfAuthdataSurvivesReconnect(t *testing.T) {
 	}
 }
 
-func TestPersistentWatchOnReconnect(t *testing.T) {
+func TestIntegration_PersistentWatchOnReconnect(t *testing.T) {
 	RequireMinimumZkVersion(t, "3.6")
+
 	WithTestCluster(t, 10*time.Second, func(ts *TestCluster, zk *Conn) {
 		zk.reconnectLatch = make(chan struct{})
 
@@ -647,8 +650,9 @@ func waitForEvent(t *testing.T, timeout time.Duration, ch EventQueue, expectedTy
 	return e
 }
 
-func TestPersistentWatchOnClose(t *testing.T) {
+func TestIntegration_PersistentWatchOnClose(t *testing.T) {
 	RequireMinimumZkVersion(t, "3.6")
+
 	WithTestCluster(t, 10*time.Second, func(_ *TestCluster, zk *Conn) {
 		ch, err := zk.AddPersistentWatch("/", AddWatchModePersistent)
 		requireNoErrorf(t, err, "could not add persistent watch")
@@ -659,8 +663,9 @@ func TestPersistentWatchOnClose(t *testing.T) {
 	})
 }
 
-func TestPersistentWatchGetsPinged(t *testing.T) {
+func TestIntegration_PersistentWatchGetsPinged(t *testing.T) {
 	RequireMinimumZkVersion(t, "3.6")
+
 	WithTestCluster(t, 60*time.Second, func(_ *TestCluster, zk *Conn) {
 		ch, err := zk.AddPersistentWatch("/", AddWatchModePersistent)
 		if err != nil {
@@ -672,7 +677,7 @@ func TestPersistentWatchGetsPinged(t *testing.T) {
 	})
 }
 
-func TestMultiFailures(t *testing.T) {
+func TestIntegration_MultiFailures(t *testing.T) {
 	// This test case ensures that we return the errors associated with each
 	// opeThis in the event a call to Multi() fails.
 	const firstPath = "/gozk-test-first"
@@ -720,7 +725,7 @@ func TestMultiFailures(t *testing.T) {
 	}
 }
 
-func TestGetSetACL(t *testing.T) {
+func TestIntegration_GetSetACL(t *testing.T) {
 	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
 	if err != nil {
 		t.Fatal(err)
@@ -774,7 +779,7 @@ func TestGetSetACL(t *testing.T) {
 	}
 }
 
-func TestAuth(t *testing.T) {
+func TestIntegration_Auth(t *testing.T) {
 	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
 	if err != nil {
 		t.Fatal(err)
@@ -825,7 +830,7 @@ func TestAuth(t *testing.T) {
 }
 
 // Tests that we correctly handle a response larger than the default buffer size
-func TestChildren(t *testing.T) {
+func TestIntegration_Children(t *testing.T) {
 	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
 	if err != nil {
 		t.Fatal(err)
@@ -884,7 +889,7 @@ func TestChildren(t *testing.T) {
 	}
 }
 
-func TestChildWatch(t *testing.T) {
+func TestIntegration_ChildWatch(t *testing.T) {
 	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
 	if err != nil {
 		t.Fatal(err)
@@ -955,7 +960,7 @@ func TestChildWatch(t *testing.T) {
 	}
 }
 
-func TestSetWatchers(t *testing.T) {
+func TestIntegration_SetWatchers(t *testing.T) {
 	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
 	if err != nil {
 		t.Fatal(err)
@@ -1104,7 +1109,7 @@ func TestSetWatchers(t *testing.T) {
 	}
 }
 
-func TestExpiringWatch(t *testing.T) {
+func TestIntegration_ExpiringWatch(t *testing.T) {
 	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
 	if err != nil {
 		t.Fatal(err)
@@ -1180,7 +1185,7 @@ func TestIdempotentClose(t *testing.T) {
 	zk.Close()
 }
 
-func TestSlowServer(t *testing.T) {
+func TestIntegration_SlowServer(t *testing.T) {
 	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
 	if err != nil {
 		t.Fatal(err)
@@ -1239,7 +1244,7 @@ func TestSlowServer(t *testing.T) {
 	}
 }
 
-func TestMaxBufferSize(t *testing.T) {
+func TestIntegration_MaxBufferSize(t *testing.T) {
 	ts, err := StartTestCluster(t, 1, nil, logWriter{t: t, p: "[ZKERR] "})
 	if err != nil {
 		t.Fatal(err)
